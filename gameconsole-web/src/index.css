@@ -1,0 +1,207 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --pixel-border: #0f172a;
+  --pixel-shadow: #0f172a;
+  --pixel-bevel-dark: rgba(15, 23, 42, 0.16);
+  --pixel-bevel-light: rgba(255, 255, 255, 0.75);
+  --pixel-emerald-bevel: rgba(4, 120, 87, 0.25);
+  --pixel-cyan-bevel: rgba(2, 132, 199, 0.25);
+  --pixel-amber-bevel: rgba(180, 83, 9, 0.28);
+  --pixel-rose-bevel: rgba(190, 18, 60, 0.25);
+  --pixel-btn-shadow: #0f172a;
+}
+
+/* Preserve crisp dark bevels inside dark Game/Dashboard containers */
+.bg-arcade-bg,
+.bg-arcade-surface,
+.bg-\[\#0b0f19\],
+.bg-\[\#131b2e\],
+.bg-\[\#050811\] {
+  color-scheme: dark;
+  --pixel-border: #334155;
+  --pixel-shadow: #020617;
+  --pixel-bevel-dark: rgba(2, 6, 23, 0.75);
+  --pixel-bevel-light: rgba(255, 255, 255, 0.06);
+  --pixel-emerald-bevel: rgba(6, 78, 59, 0.75);
+  --pixel-cyan-bevel: rgba(22, 78, 99, 0.75);
+  --pixel-amber-bevel: rgba(120, 53, 15, 0.75);
+  --pixel-rose-bevel: rgba(136, 19, 55, 0.75);
+  --pixel-btn-shadow: #020617;
+}
+
+* {
+  border-radius: 0 !important;
+}
+
+body {
+  margin: 0;
+  font-family: 'Silkscreen', monospace;
+  background-color: #e0f2fe;
+  color: #0f172a;
+  overflow-x: hidden;
+  font-variant-numeric: tabular-nums;
+}
+
+canvas,
+.pixelated {
+  image-rendering: -moz-crisp-edges;
+  image-rendering: -webkit-crisp-edges;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Custom Pixel Scrollbars */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #dbeafe;
+  border-left: 2px solid #93c5fd;
+}
+::-webkit-scrollbar-thumb {
+  background: #2563eb;
+  border: 2px solid #dbeafe;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #f59e0b;
+}
+
+/* 16-Bit Pixel Grid Background (Cheerful Sky default; dark inside dark containers) */
+@layer components {
+  .arcade-grid-bg {
+    background-color: #e0f2fe;
+    background-size: 24px 24px;
+    background-image:
+      linear-gradient(to right, #bfdbfe 2px, transparent 2px),
+      linear-gradient(to bottom, #bfdbfe 2px, transparent 2px);
+  }
+}
+
+.bg-arcade-bg.arcade-grid-bg,
+.bg-\[\#0b0f19\].arcade-grid-bg {
+  background-color: #0b0f19;
+  background-size: 24px 24px;
+  background-image:
+    linear-gradient(to right, rgba(30, 41, 59, 0.45) 2px, transparent 2px),
+    linear-gradient(to bottom, rgba(30, 41, 59, 0.45) 2px, transparent 2px);
+}
+
+.bg-arcade-surface .arcade-grid-bg,
+.bg-\[\#131b2e\] .arcade-grid-bg {
+  background-color: transparent;
+  background-size: 24px 24px;
+  background-image:
+    linear-gradient(to right, rgba(30, 41, 59, 0.45) 2px, transparent 2px),
+    linear-gradient(to bottom, rgba(30, 41, 59, 0.45) 2px, transparent 2px);
+}
+
+/* CRT Scanline Overlay — PRESERVADO INTACTO */
+.scanline {
+  position: relative;
+}
+.scanline::before {
+  content: " ";
+  display: block;
+  position: absolute;
+  top: 0; left: 0; bottom: 0; right: 0;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%);
+  background-size: 100% 4px;
+  z-index: 20;
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+/* Stepped 8-bit/16-bit Pixel Art Borders (NES.css inspired, zero blur) */
+.pixel-box {
+  position: relative;
+  border: 3px solid var(--pixel-border);
+  box-shadow:
+    inset -3px -3px 0px 0px var(--pixel-bevel-dark),
+    inset 3px 3px 0px 0px var(--pixel-bevel-light),
+    4px 4px 0px 0px var(--pixel-shadow);
+}
+
+.pixel-box-emerald {
+  border: 3px solid #10b981;
+  box-shadow:
+    inset -3px -3px 0px 0px var(--pixel-emerald-bevel),
+    inset 3px 3px 0px 0px rgba(110, 231, 183, 0.2),
+    4px 4px 0px 0px var(--pixel-shadow);
+}
+
+.pixel-box-cyan {
+  border: 3px solid #06b6d4;
+  box-shadow:
+    inset -3px -3px 0px 0px var(--pixel-cyan-bevel),
+    inset 3px 3px 0px 0px rgba(103, 232, 249, 0.2),
+    4px 4px 0px 0px var(--pixel-shadow);
+}
+
+.pixel-box-amber {
+  border: 3px solid #f59e0b;
+  box-shadow:
+    inset -3px -3px 0px 0px var(--pixel-amber-bevel),
+    inset 3px 3px 0px 0px rgba(253, 224, 71, 0.22),
+    4px 4px 0px 0px var(--pixel-shadow);
+}
+
+.pixel-box-rose {
+  border: 3px solid #f43f5e;
+  box-shadow:
+    inset -3px -3px 0px 0px var(--pixel-rose-bevel),
+    inset 3px 3px 0px 0px rgba(253, 164, 175, 0.2),
+    4px 4px 0px 0px var(--pixel-shadow);
+}
+
+/* Tactile Arcade Pixel Buttons */
+.pixel-btn,
+.btn-brutal {
+  position: relative;
+  border-width: 3px;
+  border-style: solid;
+  box-shadow:
+    inset -2px -2px 0px 0px rgba(15, 23, 42, 0.22),
+    inset 2px 2px 0px 0px rgba(255, 255, 255, 0.3),
+    3px 3px 0px 0px var(--pixel-btn-shadow);
+  transition: transform 0.05s steps(2), box-shadow 0.05s steps(2);
+}
+
+.pixel-btn:hover:not(:disabled),
+.btn-brutal:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow:
+    inset -2px -2px 0px 0px rgba(15, 23, 42, 0.22),
+    inset 2px 2px 0px 0px rgba(255, 255, 255, 0.35),
+    4px 4px 0px 0px var(--pixel-btn-shadow);
+}
+
+.pixel-btn:active:not(:disabled),
+.btn-brutal:active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow:
+    inset 2px 2px 0px 0px rgba(15, 23, 42, 0.3),
+    0px 0px 0px 0px var(--pixel-btn-shadow);
+}
+
+/* Segmented Pixel Progress Bar */
+.pixel-progress-track {
+  background: #020617;
+  border: 2px solid #334155;
+  padding: 2px;
+}
+
+.pixel-progress-fill {
+  height: 100%;
+  background-image: repeating-linear-gradient(
+    90deg,
+    currentColor 0px,
+    currentColor 6px,
+    rgba(2, 6, 23, 0.45) 6px,
+    rgba(2, 6, 23, 0.45) 8px
+  );
+}
