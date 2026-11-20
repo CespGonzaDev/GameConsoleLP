@@ -4,12 +4,12 @@ GameConsole - Carril C (Microservicio Prolog IA)
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from solver import PrologBattleshipSolver, check_swipl_installed
 
@@ -43,7 +43,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # credentials + wildcard origin is invalid/unsafe; the API is cookie-less
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -54,10 +54,12 @@ app.add_middleware(
 # -----------------------------------------------------------------------------
 
 class ShotHistoryItem(BaseModel):
-    row: int = Field(..., ge=0, description="Row index (0-based)")
-    col: int = Field(..., ge=0, description="Column index (0-based)")
-    result: str = Field(..., description="'HIT' or 'MISS'")
-    shipSunk: Optional[str] = Field(None, description="Name of ship sunk or null")
+    row: int = Field(..., ge=0, le=25, description="Row index (0-based)")
+    col: int = Field(..., ge=0, le=25, description="Column index (0-based)")
+    result: Literal["HIT", "MISS"] = Field(..., description="'HIT' or 'MISS'")
+    shipSunk: Optional[str] = Field(
+        None, pattern=r"^[A-Za-z0-9 _.-]{1,40}$", description="Name of ship sunk or null"
+    )
 
 
 class BoardDimensions(BaseModel):
@@ -67,10 +69,22 @@ class BoardDimensions(BaseModel):
 
 class PrologMoveRequest(BaseModel):
     matchId: str = Field(..., description="UUID of the match")
-    difficulty: Optional[str] = Field("tactical", description="'easy' | 'tactical' | 'hard'")
+    difficulty: Literal["easy", "tactical", "hard"] = Field("tactical", description="'easy' | 'tactical' | 'hard'")
     boardDimensions: Optional[BoardDimensions] = Field(default_factory=BoardDimensions)
-    shotsHistory: List[ShotHistoryItem] = Field(default_factory=list)
-    remainingShipsLengths: List[int] = Field(default_factory=lambda: [5, 4, 3, 3, 2])
+    shotsHistory: List[ShotHistoryItem] = Field(default_factory=list, max_length=700)
+    remainingShipsLengths: List[int] = Field(
+        default_factory=lambda: [5, 4, 3, 3, 2], max_length=20
+    )
+
+    @model_validator(mode="after")
+    def _check_ranges(self):
+        dims = self.boardDimensions or BoardDimensions()
+        for s in self.shotsHistory:
+            if s.row >= dims.rows or s.col >= dims.cols:
+                raise ValueError(f"Shot ({s.row},{s.col}) is outside the {dims.rows}x{dims.cols} board")
+        if any(n < 1 or n > max(dims.rows, dims.cols) for n in self.remainingShipsLengths):
+            raise ValueError("remainingShipsLengths values must be between 1 and the board size")
+        return self
 
 
 class DecisionCoord(BaseModel):
@@ -133,6 +147,8 @@ async def next_move(request: PrologMoveRequest):
             heuristic=heuristic,
             inferenceTimeMs=inference_time_ms
         )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         logger.exception("Failed to compute next move")
         raise HTTPException(

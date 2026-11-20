@@ -417,7 +417,7 @@ export class SnakeGame extends BaseGame {
 
   private handleCollision(collisionWith: 'WALL' | 'SELF'): void {
     // Telemetry: COLLISION
-    this.emit<SnakeCollisionPayload>('ACTION', 'COLLISION', {
+    this.emit<SnakeCollisionPayload>('STATE_UPDATE', 'COLLISION', {
       collisionWith,
       finalScore: this.currentScore
     });

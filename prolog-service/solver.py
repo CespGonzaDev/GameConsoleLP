@@ -4,6 +4,7 @@ Bridge between FastAPI and SWI-Prolog (with robust pure-Python fallback).
 """
 
 import os
+import re
 import subprocess
 import time
 import shutil
@@ -13,6 +14,113 @@ from typing import List, Dict, Any, Tuple, Optional
 logger = logging.getLogger("prolog_solver")
 
 PROLOG_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "battleship_ai.pl")
+
+ALLOWED_RESULTS = {"HIT", "MISS"}
+ALLOWED_DIFFICULTIES = {"easy", "tactical", "hard"}
+# Ship names are interpolated into a Prolog goal: only a conservative charset is allowed.
+SHIP_NAME_RE = re.compile(r"^[A-Za-z0-9 _.-]{1,40}$")
+MAX_BOARD_SIZE = 26
+
+# Must stay in sync with ship_length/2 in battleship_ai.pl
+SHIP_LENGTHS = {
+    "Aircraft Carrier": 5,
+    "Carrier": 5,
+    "Battleship": 4,
+    "Cruiser": 3,
+    "Submarine": 3,
+    "Destroyer": 2,
+    "Patrol Boat": 2,
+}
+DEFAULT_SHIP_LENGTH = 2
+
+
+def _is_sunk_name(sunk: Any) -> bool:
+    return sunk is not None and sunk not in ("null", "none", "")
+
+
+def sanitize_request(
+    rows: int,
+    cols: int,
+    shots_history: List[Dict[str, Any]],
+    remaining_lengths: List[int],
+    difficulty: str,
+) -> Tuple[int, int, List[Dict[str, Any]], List[int], str]:
+    """
+    Validates and normalises every value that ends up inside a Prolog goal.
+    Raises ValueError on anything unexpected (never silently coerces strings into atoms).
+    """
+    rows, cols = int(rows), int(cols)
+    if not (1 <= rows <= MAX_BOARD_SIZE and 1 <= cols <= MAX_BOARD_SIZE):
+        raise ValueError("Board dimensions out of range")
+
+    difficulty = (difficulty or "tactical").lower()
+    if difficulty not in ALLOWED_DIFFICULTIES:
+        raise ValueError(f"Invalid difficulty: {difficulty!r}")
+
+    clean_shots: List[Dict[str, Any]] = []
+    for s in shots_history:
+        r, c = int(s.get("row", 0)), int(s.get("col", 0))
+        if not (0 <= r < rows and 0 <= c < cols):
+            raise ValueError(f"Shot ({r},{c}) outside the board")
+        res = str(s.get("result", "MISS")).upper()
+        if res not in ALLOWED_RESULTS:
+            raise ValueError(f"Invalid shot result: {res!r}")
+        sunk = s.get("shipSunk")
+        if _is_sunk_name(sunk):
+            if not isinstance(sunk, str) or not SHIP_NAME_RE.match(sunk):
+                raise ValueError("Invalid shipSunk value")
+        else:
+            sunk = None
+        clean_shots.append({"row": r, "col": c, "result": res, "shipSunk": sunk})
+
+    clean_lengths = [int(n) for n in remaining_lengths]
+    if len(clean_lengths) > 20 or any(not (1 <= n <= MAX_BOARD_SIZE) for n in clean_lengths):
+        raise ValueError("Invalid remainingShipsLengths")
+
+    return rows, cols, clean_shots, clean_lengths, difficulty
+
+
+def compute_sunk_cells(shots_history: List[Dict[str, Any]]) -> set:
+    """
+    Python mirror of sunk_cells/2 in battleship_ai.pl.
+    Only the last hit of a ship carries shipSunk; a ship of length L occupies a straight
+    segment of L HIT cells containing it, made of hits shot BEFORE the sinking and not yet
+    claimed. Ties go to the segment built from the most recent shots.
+    """
+    claimed: set = set()
+    prefix: List[Tuple[int, int]] = []  # earlier HIT cells, most recent first
+    for s in shots_history:
+        r, c = int(s["row"]), int(s["col"])
+        if str(s.get("result", "")).upper() == "HIT" and _is_sunk_name(s.get("shipSunk")):
+            length = SHIP_LENGTHS.get(s["shipSunk"], DEFAULT_SHIP_LENGTH)
+            best_score, best_seg = None, None
+            for off in range(length):
+                segs = [
+                    [(r, c - off + i) for i in range(length)],
+                    [(r - off + i, c) for i in range(length)],
+                ]
+                for seg in segs:
+                    if min(min(p) for p in seg) < 0:
+                        continue
+                    score, ok = 0, True
+                    for cell in seg:
+                        if cell == (r, c):
+                            continue
+                        if cell in claimed or cell not in prefix:
+                            ok = False
+                            break
+                        score -= prefix.index(cell)
+                    if ok and (best_score is None or score >= best_score):
+                        best_score, best_seg = score, seg
+            claimed.update(best_seg if best_seg else [(r, c)])
+        if str(s.get("result", "")).upper() == "HIT":
+            prefix.insert(0, (r, c))
+    return claimed
+
+
+def _pl_atom(value: str) -> str:
+    """Quotes a validated string as a Prolog atom (defence in depth: escapes \\ and ')."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def check_swipl_installed() -> bool:
@@ -40,6 +148,10 @@ class PrologBattleshipSolver:
         """
         Solves next move returning (row, col, mode, heuristic, inference_time_ms).
         """
+        # Raises ValueError for malformed input (deliberately NOT swallowed by the fallback)
+        rows, cols, shots_history, remaining_lengths, difficulty = sanitize_request(
+            rows, cols, shots_history, remaining_lengths, difficulty
+        )
         start_time = time.perf_counter()
 
         if self.has_swipl and os.path.exists(self.pl_path):
@@ -68,25 +180,21 @@ class PrologBattleshipSolver:
         difficulty: str
     ) -> Tuple[int, int, str, str]:
         """Runs SWI-Prolog query via swipl CLI."""
+        # Inputs were validated by sanitize_request(); atoms are still escaped on top of that.
         shots_terms = []
         for s in shots_history:
-            r = int(s.get("row", 0))
-            c = int(s.get("col", 0))
-            res = s.get("result", "MISS").upper()
             sunk = s.get("shipSunk")
-            if sunk is None or sunk == "null" or sunk == "":
-                sunk_term = "null"
-            else:
-                # Sanitize ship name for Prolog atom
-                sunk_term = f"'{sunk}'"
-            shots_terms.append(f"shot({r},{c},'{res}',{sunk_term})")
+            sunk_term = _pl_atom(sunk) if sunk else "null"
+            shots_terms.append(
+                f"shot({int(s['row'])},{int(s['col'])},{_pl_atom(s['result'])},{sunk_term})"
+            )
 
         shots_str = "[" + ",".join(shots_terms) + "]"
         lengths_str = "[" + ",".join(str(int(l)) for l in remaining_lengths) + "]"
-        diff_str = difficulty.lower() if difficulty else "tactical"
+        diff_str = _pl_atom(difficulty)
 
         goal = (
-            f"solve_move({rows}, {cols}, {shots_str}, {lengths_str}, '{diff_str}', "
+            f"solve_move({int(rows)}, {int(cols)}, {shots_str}, {lengths_str}, {diff_str}, "
             f"Row, Col, Mode, Heuristic), "
             f"format('~w,~w,~w,~w~n', [Row, Col, Mode, Heuristic])"
         )
@@ -142,22 +250,8 @@ class PrologBattleshipSolver:
             sunk = s.get("shipSunk")
             shot_map[(r, c)] = {"result": res, "shipSunk": sunk}
 
-        # 1. Active hits (HIT and not sunk, nor connected to sunk)
-        sunk_cells = {
-            coord for coord, data in shot_map.items()
-            if data["result"] == "HIT" and data["shipSunk"] is not None and data["shipSunk"] != "null" and data["shipSunk"] != ""
-        }
-
-        # Expand sunk cells to all connected HITs
-        all_sunk = set(sunk_cells)
-        queue = list(sunk_cells)
-        while queue:
-            curr = queue.pop(0)
-            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                neighbor = (curr[0] + dr, curr[1] + dc)
-                if neighbor in shot_map and shot_map[neighbor]["result"] == "HIT" and neighbor not in all_sunk:
-                    all_sunk.add(neighbor)
-                    queue.append(neighbor)
+        # 1. Active hits: HITs that do not belong to a sunk ship
+        all_sunk = compute_sunk_cells(shots_history)
 
         active_hits = [
             coord for coord, data in shot_map.items()

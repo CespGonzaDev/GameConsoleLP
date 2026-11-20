@@ -143,7 +143,17 @@ export class GameSessionManager {
   private dispatcher: IEventDispatcher = defaultFallbackDispatcher;
   private listeners: Set<(sessions: ActiveSession[]) => void> = new Set();
 
-  private constructor() {}
+  private constructor() {
+    if (typeof window !== 'undefined') {
+      // Cerrar la pestaña con partidas abiertas: emitir MATCH_FINISHED y volcarlo con keepalive.
+      // (El listener del EventDispatcher se registró antes, por eso se vuelca aquí explícitamente.)
+      window.addEventListener('pagehide', () => {
+        if (this.sessions.size === 0) return;
+        this.terminateAll();
+        this.dispatcher.flushOnExit?.();
+      });
+    }
+  }
 
   public static getInstance(): GameSessionManager {
     if (!GameSessionManager.instance) {
@@ -278,7 +288,8 @@ export class GameSessionManager {
   public terminateSession(matchId: string, reason: string = 'USER_CLOSED'): void {
     const session = this.sessions.get(matchId);
     if (session) {
-      session.gameInstance.finish(session.playerId, session.score, reason);
+      // abort() emits MATCH_FINISHED with the game's real score (session.score is never updated)
+      session.gameInstance.abort(reason);
       session.gameInstance.destroy();
       session.status = 'FINISHED';
       this.sessions.delete(matchId);

@@ -9,7 +9,7 @@
 // ==========================================
 
 export type GameId = 'snake' | 'battleship' | 'head_football' | (string & {});
-export type EventCategory = 'LIFECYCLE' | 'INPUT' | 'ACTION' | 'INTERACTION';
+export type EventCategory = 'LIFECYCLE' | 'INPUT' | 'ACTION' | 'STATE_UPDATE' | 'INTERACTION';
 
 export interface GameStatsEventEnvelope<T = Record<string, unknown>> {
   /** UUID v4 válido */

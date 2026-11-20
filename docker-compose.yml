@@ -1,16 +1,21 @@
-# GameConsole Compose: Frontend Web + Microservicio Prolog IA
-# Se conecta a la red externa 'gamestats-net' compartida con GameStats Ingestion (Go) y Analysis (Scala).
+# GameConsole Compose: Consola Web + Microservicio Prolog IA
+# Se conecta a la red externa 'gamestats-net' creada por el stack GameStats (Go + Scala).
 #
 # Uso:
-#   docker network create gamestats-net   # (si la red aún no fue creada por P1/GameStats)
-#   docker compose up --build -d
-#   docker compose down
+#   1) Levantar GameStats primero (crea la red):   cd ../GameStats && docker compose up --build -d --wait
+#      o, si la red aún no existe:                 docker network create gamestats-net
+#   2) docker compose up --build -d
+#   3) docker compose down
+#
+# Si el contenedor de ingestión Go de GameStats NO se llama "ingestion-go" en la red,
+# indícalo con GAMESTATS_UPSTREAM (host:puerto), p. ej.:
+#   GAMESTATS_UPSTREAM=gamestats-ingestion:8080 docker compose up --build -d
 
 name: gameconsole
 
 services:
   # Microservicio de IA en Prolog (SWI-Prolog + FastAPI) para Battleship
-  gameconsole-prolog-ai:
+  prolog-ai-service:
     build:
       context: ./prolog-service
     image: gameconsole-prolog-ai:latest
@@ -19,30 +24,31 @@ services:
     ports:
       - "${PROLOG_PORT:-5000}:5000"
     networks:
-      gamestats-net:
-        aliases:
-          - prolog-ai-service
+      - gamestats-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:5000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5000/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 15s
     restart: unless-stopped
 
-  # Consola Web (React 19 + TypeScript + Vite + Tailwind servido con Nginx)
-  gameconsole-frontend:
+  # Consola Web (React + TypeScript + Vite servido con Nginx) en :3000
+  gameconsole-web:
     build:
       context: ./gameconsole-web
-    image: gameconsole-frontend:latest
-    container_name: gameconsole-frontend
+    image: gameconsole-web:latest
+    container_name: gameconsole-web
+    environment:
+      GAMESTATS_UPSTREAM: ${GAMESTATS_UPSTREAM:-ingestion-go:8080}
+      PROLOG_UPSTREAM: prolog-ai-service:5000
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     networks:
       - gamestats-net
     depends_on:
-      gameconsole-prolog-ai:
-        condition: service_started
+      prolog-ai-service:
+        condition: service_healthy
     restart: unless-stopped
 
 networks:

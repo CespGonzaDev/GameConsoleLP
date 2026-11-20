@@ -774,12 +774,18 @@ export class HeadFootballGame extends BaseGame {
       [this.p2Id]: this.p2Score
     };
 
+    // Elapsed match minute 0..90 (matchMinute is a display countdown, not valid for telemetry)
+    const elapsedMinute = Math.min(
+      90,
+      Math.max(0, Math.round((this.matchTimeElapsed / this.matchDurationSeconds) * 90))
+    );
+
     this.emit<HeadFootballGoalPayload>(
-      'ACTION',
+      'STATE_UPDATE',
       'GOAL',
       {
         scorerId,
-        minute: this.matchMinute,
+        minute: elapsedMinute,
         currentScore: currentScorePayload
       },
       scorerId

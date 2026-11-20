@@ -10,6 +10,8 @@ import {
 
 export interface IEventDispatcher {
   dispatch<T = Record<string, unknown>>(event: GameStatsEventEnvelope<T>): Promise<boolean> | boolean | void;
+  /** Vaciado síncrono con keepalive al cerrar la pestaña (opcional) */
+  flushOnExit?(): void;
 }
 
 export interface BaseGameOptions {
@@ -158,8 +160,9 @@ export abstract class BaseGame {
    */
   public abort(reason: string = 'USER_ABORT'): void {
     if (this.status === 'FINISHED' || this.status === 'ABORTED') return;
-    this.status = 'ABORTED';
+    // finish() must run first (it ignores calls once ABORTED) so MATCH_FINISHED is emitted
     this.finish(undefined, this.currentScore, reason);
+    this.status = 'ABORTED';
   }
 
   /**

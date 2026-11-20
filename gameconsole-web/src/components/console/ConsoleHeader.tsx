@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { PixelIcon } from '../pixel/PixelIcon';
 import { eventDispatcher, DispatcherStatus } from '../../services/EventDispatcher';
+import { useServiceHealth } from '../../services/useServiceHealth';
 
 export type NavigationTab = 'lobby' | 'dock' | 'telemetry';
 
@@ -20,6 +21,7 @@ export const ConsoleHeader: React.FC<ConsoleHeaderProps> = ({
   onToggleScanline
 }) => {
   const [txStatus, setTxStatus] = useState<DispatcherStatus>(() => eventDispatcher.getStatus());
+  const health = useServiceHealth(10000);
 
   useEffect(() => {
     const unsubscribe = eventDispatcher.subscribe((status) => {
@@ -106,9 +108,24 @@ export const ConsoleHeader: React.FC<ConsoleHeaderProps> = ({
                 )}
               </span>
 
-              <span className="hidden md:inline-flex items-center space-x-1 bg-[#e0f2fe] text-[#0f172a] border-2 border-[#0f172a] px-2 py-0.5 shadow-[2px_2px_0_0_#0f172a] font-bold">
+              <span
+                title={health.prologEngine ? `Engine: ${health.prologEngine}` : 'Prolog AI service'}
+                className="hidden md:inline-flex items-center space-x-1 bg-[#e0f2fe] text-[#0f172a] border-2 border-[#0f172a] px-2 py-0.5 shadow-[2px_2px_0_0_#0f172a] font-bold"
+              >
                 <PixelIcon name="cpu" size={11} className="text-[#0284c7]" />
                 <span>PROLOG AI</span>
+                <span
+                  className={`inline-block w-2 h-2 border border-[#0f172a] ${
+                    health.prolog === 'online'
+                      ? 'bg-emerald-500'
+                      : health.prolog === 'offline'
+                      ? 'bg-rose-500'
+                      : 'bg-amber-400 animate-pulse'
+                  }`}
+                />
+                <span className="text-[9px]">
+                  {health.prolog === 'online' ? 'ON' : health.prolog === 'offline' ? 'OFF (local)' : '...'}
+                </span>
               </span>
             </div>
           </div>

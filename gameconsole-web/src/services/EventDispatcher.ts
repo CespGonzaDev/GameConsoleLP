@@ -16,6 +16,8 @@ export interface IEventDispatcher {
   dispatch<T = Record<string, unknown>>(event: GameStatsEventEnvelope<T>): void;
   /** Fuerza el vaciado inmediato de la cola pendiente */
   flush(): Promise<void>;
+  /** Vaciado síncrono con keepalive para cierre de pestaña */
+  flushOnExit(): void;
   /** Retorna la cantidad de eventos en cola pendientes */
   getPendingCount(): number;
   /** Suscribe un callback a cambios de estado del despachador */
@@ -41,6 +43,9 @@ export interface EventDispatcherOptions {
   maxQueueSize?: number;
 }
 
+/** Límite conservador (caracteres) para un cuerpo con keepalive: el navegador permite ~64 KB */
+const KEEPALIVE_MAX_CHARS = 60000;
+
 /**
  * Filtra estrictamente el sobre a los 9 campos reconocidos por el JSON Schema de Go
  * evitando que propiedades auxiliares de frontend causen error en Go DisallowUnknownFields.
@@ -64,6 +69,8 @@ export class EventDispatcher implements IEventDispatcher {
   private inFlightBatch: GameStatsEventEnvelope[] | null = null;
   private isProcessing = false;
   private timerId: ReturnType<typeof setTimeout> | null = null;
+  /** true mientras haya un MATCH_FINISHED pendiente: los lotes se envían con keepalive */
+  private urgentFlush = false;
 
   private consecutiveErrors = 0;
   private totalSent = 0;
@@ -106,6 +113,14 @@ export class EventDispatcher implements IEventDispatcher {
     const clean = sanitizeEnvelope(event);
     this.queue.push(clean as GameStatsEventEnvelope);
     this.notifyStatus();
+
+    // MATCH_FINISHED dispara el análisis en Scala: se vacía la cola de inmediato con keepalive
+    // (sobrevive al cierre de la pestaña) en lugar de esperar al próximo intervalo.
+    if (clean.type === 'LIFECYCLE' && clean.action === 'MATCH_FINISHED') {
+      this.urgentFlush = true;
+      if (!this.isProcessing) this.scheduleNextFlush(0);
+      return;
+    }
 
     // Si alcanzamos el tamaño de lote deseado, intentamos despachar rápido
     if (this.queue.length >= this.maxBatchSize && !this.isProcessing) {
@@ -209,6 +224,7 @@ export class EventDispatcher implements IEventDispatcher {
       if (this.queue.length > 0) {
         this.scheduleNextFlush(0);
       } else {
+        this.urgentFlush = false;
         this.scheduleNextFlush(this.flushIntervalMs);
       }
     } else {
@@ -238,12 +254,15 @@ export class EventDispatcher implements IEventDispatcher {
    */
   private async sendBatch(batch: GameStatsEventEnvelope[]): Promise<boolean> {
     try {
+      const body = JSON.stringify(batch);
       const res = await fetch(this.endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(batch),
+        body,
+        // keepalive está limitado a ~64 KB por el navegador
+        ...(this.urgentFlush && body.length < KEEPALIVE_MAX_CHARS ? { keepalive: true } : {}),
       });
 
       if (res.status === 202 || res.status === 200) {
@@ -269,7 +288,12 @@ export class EventDispatcher implements IEventDispatcher {
       this.timerId = null;
     }
 
-    while (this.queue.length > 0) {
+    while (this.queue.length > 0 || this.isProcessing) {
+      if (this.isProcessing) {
+        // Hay un lote en vuelo: processQueue() retornaría de inmediato, así que esperamos sin girar en microtareas
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        continue;
+      }
       await this.processQueue();
       if (this.consecutiveErrors > 0) {
         // Si hay error de red, no hacemos bucle infinito en flush
@@ -285,36 +309,49 @@ export class EventDispatcher implements IEventDispatcher {
   private setupPageLifecycleHandlers(): void {
     if (typeof window === 'undefined') return;
 
-    const handleExit = () => {
-      // Reclamamos todos los eventos pendientes
-      const remaining: GameStatsEventEnvelope[] = [];
-      if (this.inFlightBatch && this.inFlightBatch.length > 0) {
-        remaining.push(...this.inFlightBatch);
-        this.inFlightBatch = null;
-      }
-      if (this.queue.length > 0) {
-        remaining.push(...this.queue);
-        this.queue = [];
-      }
-
-      if (remaining.length === 0) return;
-
-      try {
-        const payload = JSON.stringify(remaining);
-        // keepalive: true permite que la petición sobreviva al cierre del documento
-        void fetch(this.endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload,
-          keepalive: true,
-        });
-      } catch (e) {
-        console.error('[EventDispatcher] Error en vaciado de emergencia pagehide:', e);
-      }
-    };
-
+    const handleExit = () => this.flushOnExit();
     window.addEventListener('pagehide', handleExit);
     window.addEventListener('beforeunload', handleExit);
+  }
+
+  /**
+   * Vaciado síncrono de emergencia (cierre de pestaña). Usa fetch con keepalive: true.
+   * El navegador limita el total de keepalive a ~64 KB, así que se envía solo el prefijo
+   * (los eventos más antiguos primero, orden FIFO) que cabe; el resto queda en la cola.
+   * El lote en vuelo se reenvía también: Go/Scala descartan duplicados por eventId.
+   */
+  public flushOnExit(): void {
+    const pending: GameStatsEventEnvelope[] = [
+      ...(this.inFlightBatch ?? []),
+      ...this.queue,
+    ];
+    if (pending.length === 0) return;
+
+    let count = 0;
+    let size = 2; // corchetes del array JSON
+    for (const ev of pending) {
+      const evSize = JSON.stringify(ev).length + 1;
+      if (count > 0 && size + evSize > KEEPALIVE_MAX_CHARS) break;
+      size += evSize;
+      count++;
+    }
+    const toSend = pending.slice(0, count);
+
+    try {
+      fetch(this.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(toSend),
+        keepalive: true,
+      }).catch((e) => {
+        console.error('[EventDispatcher] Falló el vaciado de emergencia (keepalive):', e);
+      });
+      // Quitamos de la cola solo lo enviado, para no reenviarlo dos veces si la página sobrevive (bfcache)
+      const sentIds = new Set(toSend.map((e) => e.eventId));
+      this.queue = this.queue.filter((e) => !sentIds.has(e.eventId));
+    } catch (e) {
+      console.error('[EventDispatcher] Error en vaciado de emergencia:', e);
+    }
   }
 
   /**

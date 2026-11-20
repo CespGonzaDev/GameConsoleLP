@@ -73,6 +73,10 @@ Si ya ejecutaste el **Paso 1** (`GameStats` levantado creando la red `gamestats-
 cd GameConsole
 docker compose up --build -d
 ```
+> Si el contenedor de ingestión Go de GameStats no se llama `ingestion-go` en la red `gamestats-net`, indícalo con
+> `GAMESTATS_UPSTREAM=<host>:8080 docker compose up --build -d`. nginx resuelve los upstreams en cada petición, así que
+> la consola arranca aunque GameStats o Prolog estén apagados (el Dashboard mostrará DOWN y la API responderá 503 JSON).
+
 - Consola Web: `http://localhost:3000`
 - API Prolog: `http://localhost:5000/health`
 - GameStats Go: `http://localhost:8080/health`

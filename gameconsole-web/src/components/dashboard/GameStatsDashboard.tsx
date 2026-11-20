@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   GameStatsServiceStats,
   InvalidEventRecord,
@@ -7,6 +7,7 @@ import {
 } from '../../types/contracts';
 import { gameStatsClient } from '../../services/GameStatsClient';
 import { eventDispatcher, DispatcherStatus } from '../../services/EventDispatcher';
+import { useServiceHealth, ServiceState } from '../../services/useServiceHealth';
 import { MetricsCards } from './MetricsCards';
 import { PatternsList, EnrichedPatternItem } from './PatternsList';
 import { InvalidEventsViewer } from './InvalidEventsViewer';
@@ -70,8 +71,51 @@ const MiniPixelMedal: React.FC<{ kind: 'DEADLY_STREAK' | 'COMEBACK' | 'OTHER' }>
   );
 };
 
+const errMsg = (reason: unknown): string =>
+  reason instanceof Error ? reason.message : String(reason);
+
+/** Pastilla de estado de un servicio (Go / Prolog) */
+const HealthPill: React.FC<{ label: string; state: ServiceState; detail?: string | null }> = ({
+  label,
+  state,
+  detail,
+}) => {
+  const color =
+    state === 'online'
+      ? 'text-arcade-accent border-emerald-700'
+      : state === 'offline'
+      ? 'text-arcade-rose border-rose-700'
+      : 'text-arcade-cyan border-cyan-700';
+  const text = state === 'online' ? 'OK' : state === 'offline' ? 'DOWN' : '...';
+  return (
+    <div
+      className={`flex items-center space-x-1.5 px-2.5 py-1.5 bg-arcade-bg border-2 ${color}`}
+      title={detail ? `${label}: ${detail}` : label}
+    >
+      <span
+        className={`inline-block w-2 h-2 ${
+          state === 'online' ? 'bg-emerald-400' : state === 'offline' ? 'bg-rose-500' : 'bg-cyan-400 animate-pulse'
+        }`}
+      />
+      <span className="font-arcade text-[10px]">
+        {label} {text}
+      </span>
+    </div>
+  );
+};
+
 export const GameStatsDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<DashboardTab>('OVERVIEW');
+  const health = useServiceHealth(5000);
+
+  // Errores visibles (los datos previos se conservan cuando una consulta falla)
+  const [fetchErrors, setFetchErrors] = useState<string[]>([]);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
+
+  // Reportes de Scala por partida, para la pestaña PATTERNS
+  const [patternReports, setPatternReports] = useState<Record<string, MatchReport>>({});
+  const requestedReports = useRef<Set<string>>(new Set());
 
   // Datos del backend
   const [stats, setStats] = useState<GameStatsServiceStats | null>(null);
@@ -106,46 +150,88 @@ export const GameStatsDashboard: React.FC = () => {
   }, []);
 
   // Carga de datos centralizada
+  // Un fallo de red NO borra los datos ya mostrados: se conservan y se avisa con un banner.
   const fetchData = useCallback(async () => {
+    if (inFlightRef.current) return; // evita consultas solapadas
+    inFlightRef.current = true;
     setIsLoading(true);
     try {
-      const [statsData, matchesData, invalidData] = await Promise.all([
-        gameStatsClient.getStats().catch(() => null),
-        gameStatsClient.getMatches().catch(() => []),
-        gameStatsClient.getInvalidEvents(100).catch(() => []),
+      const [statsRes, matchesRes, invalidRes] = await Promise.allSettled([
+        gameStatsClient.getStats(),
+        gameStatsClient.getMatches(),
+        gameStatsClient.getInvalidEvents(100),
       ]);
 
-      if (statsData) {
-        setStats(statsData);
+      const errors: string[] = [];
+      if (statsRes.status === 'fulfilled') {
+        setStats(statsRes.value);
         setIsOnline(true);
       } else {
         setIsOnline(false);
+        errors.push(`GameStats no responde (/stats): ${errMsg(statsRes.reason)}`);
+      }
+      if (matchesRes.status === 'fulfilled') {
+        setMatches(matchesRes.value);
+      } else if (statsRes.status === 'fulfilled') {
+        errors.push(`Fallo al listar partidas (/matches): ${errMsg(matchesRes.reason)}`);
+      }
+      if (invalidRes.status === 'fulfilled') {
+        setInvalidEvents(invalidRes.value);
+      } else if (statsRes.status === 'fulfilled') {
+        errors.push(`Fallo al leer eventos inválidos (/invalid): ${errMsg(invalidRes.reason)}`);
       }
 
-      setMatches(matchesData);
-      setInvalidEvents(invalidData);
-      setLastRefreshedAt(new Date());
-    } catch {
-      setIsOnline(false);
+      setFetchErrors(errors);
+      if (statsRes.status === 'fulfilled' || matchesRes.status === 'fulfilled') {
+        setLastRefreshedAt(new Date());
+      }
     } finally {
+      inFlightRef.current = false;
       setIsLoading(false);
     }
   }, []);
 
-  // Intervalo de auto-refresco
+  // Intervalo de auto-refresco (se pausa con la pestaña oculta y se refresca al volver)
   useEffect(() => {
     void fetchData();
-    if (autoRefreshInterval <= 0) return;
+    const onVisible = () => {
+      if (!document.hidden) void fetchData();
+    };
+    document.addEventListener('visibilitychange', onVisible);
 
-    const interval = setInterval(() => {
-      void fetchData();
-    }, autoRefreshInterval);
+    let interval: ReturnType<typeof setInterval> | undefined;
+    if (autoRefreshInterval > 0) {
+      interval = setInterval(() => {
+        if (!document.hidden) void fetchData();
+      }, autoRefreshInterval);
+    }
 
-    return () => clearInterval(interval);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      if (interval) clearInterval(interval);
+    };
   }, [fetchData, autoRefreshInterval]);
 
-  // Selección e inspección profunda de partida
+  // Carga (una vez por partida/actualización) del reporte de Scala de las partidas con patrones
+  useEffect(() => {
+    const pending = matches
+      .filter((m) => m.patterns.length > 0 && !requestedReports.current.has(`${m.matchId}@${m.updatedAt}`))
+      .slice(0, 20);
+    pending.forEach((m) => {
+      const key = `${m.matchId}@${m.updatedAt}`;
+      requestedReports.current.add(key);
+      gameStatsClient
+        .getMatchById(m.matchId)
+        .then((report) => {
+          if (report) setPatternReports((prev) => ({ ...prev, [m.matchId]: report }));
+        })
+        .catch(() => requestedReports.current.delete(key)); // error de red: reintentar luego
+    });
+  }, [matches]);
+
+  // Selección e inspección profunda de partida (reporte completo calculado por Scala)
   const handleSelectMatch = async (matchId: string) => {
+    setDetailError(null);
     try {
       setIsLoading(true);
       const detail = await gameStatsClient.getMatchById(matchId);
@@ -153,35 +239,12 @@ export const GameStatsDashboard: React.FC = () => {
         setSelectedMatch(detail);
         setIsModalOpen(true);
       } else {
-        // Si aún no está analizada por Scala, generamos un resumen temporal
-        const summary = matches.find((m) => m.matchId === matchId);
-        if (summary) {
-          setSelectedMatch({
-            matchId: summary.matchId,
-            gameId: summary.gameId,
-            gameVersion: '1.0.0',
-            status: summary.status,
-            eventCount: summary.eventCount,
-            duplicatesDropped: 0,
-            actionCounts: {},
-            matchMetrics: {},
-            players: [],
-            patterns: summary.patterns.map((p) => ({
-              pattern: p,
-              playerId: 'PENDING_ANALYSIS',
-              startedAt: summary.updatedAt,
-              endedAt: summary.updatedAt,
-              eventIds: [],
-              description: `Patrón ${p} detectado en el pipeline`,
-              details: {},
-            })),
-            warnings: ['Partida en procesamiento por Scala o reporte en cola.'],
-          });
-          setIsModalOpen(true);
-        }
+        setDetailError(
+          `El reporte de Scala para ${matchId} aún no está disponible (partida en curso o análisis en cola). Inténtalo de nuevo en unos segundos.`
+        );
       }
     } catch (err) {
-      console.error('Error cargando detalle de partida:', err);
+      setDetailError(`No se pudo cargar el detalle de ${matchId}: ${errMsg(err)}`);
     } finally {
       setIsLoading(false);
     }
@@ -211,31 +274,34 @@ export const GameStatsDashboard: React.FC = () => {
   const enrichedPatterns: EnrichedPatternItem[] = useMemo(() => {
     const list: EnrichedPatternItem[] = [];
     matches.forEach((m) => {
-      if (Array.isArray(m.patterns)) {
-        m.patterns.forEach((p) => {
+      if (!Array.isArray(m.patterns) || m.patterns.length === 0) return;
+      const report = patternReports[m.matchId];
+      if (report && report.patterns.length > 0) {
+        // Datos reales calculados por Scala (jugador, ventana temporal, detalles)
+        report.patterns.forEach((pattern) =>
+          list.push({ matchId: m.matchId, gameId: m.gameId, pattern })
+        );
+      } else {
+        // Reporte aún no cargado: solo lo que /matches informa, sin inventar jugador
+        m.patterns.forEach((p) =>
           list.push({
             matchId: m.matchId,
             gameId: m.gameId,
             pattern: {
               pattern: p,
-              playerId: 'Player',
+              playerId: '—',
               startedAt: m.updatedAt,
               endedAt: m.updatedAt,
               eventIds: [],
-              description:
-                p === 'DEADLY_STREAK'
-                  ? 'Racha mortal de impactos o hundimientos sin fallos.'
-                  : p === 'COMEBACK'
-                  ? 'Remontada épica tras desventaja de 2 o más goles/puntos.'
-                  : `Patrón de juego detectado: ${p}`,
+              description: `Patrón ${p} detectado por Scala (cargando reporte detallado...)`,
               details: {},
             },
-          });
-        });
+          })
+        );
       }
     });
     return list;
-  }, [matches]);
+  }, [matches, patternReports]);
 
   const maxMatchEvents = useMemo(() => {
     return matches.reduce((max, m) => Math.max(max, m.eventCount), 1);
@@ -256,7 +322,7 @@ export const GameStatsDashboard: React.FC = () => {
           </div>
           <div>
             <h1 className="font-arcade text-sm sm:text-base tracking-wider text-white">
-              GAMESTATS TELEMETRY CONSOLE
+              GAMESTATS LIVE
             </h1>
             <p className="text-xs font-pixel text-slate-400">
               Pipeline de Ingesta Go + Analítica Scala + Prolog IA
@@ -270,7 +336,11 @@ export const GameStatsDashboard: React.FC = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Health indicator */}
+          {/* Salud real de los servicios (GET /health de Go y de Prolog) */}
+          <HealthPill label="GO" state={health.go} detail="GameStats Ingestion (GET /health)" />
+          <HealthPill label="PROLOG" state={health.prolog} detail={health.prologEngine} />
+
+          {/* Health indicator (/stats) */}
           <div className="flex items-center space-x-2 px-3 py-1.5 bg-arcade-bg pixel-box text-xs">
             {isOnline === true ? (
               <>
@@ -320,6 +390,29 @@ export const GameStatsDashboard: React.FC = () => {
           </button>
         </div>
       </header>
+
+      {/* Errores de red / detalle (los datos anteriores se conservan en pantalla) */}
+      {(fetchErrors.length > 0 || detailError) && (
+        <div role="alert" className="bg-rose-950/60 border-2 border-rose-500 p-3 text-xs text-rose-200 space-y-1">
+          {fetchErrors.map((e) => (
+            <p key={e}>⚠ {e}</p>
+          ))}
+          {fetchErrors.length > 0 && stats && (
+            <p className="text-rose-300/80">Mostrando los últimos datos conocidos.</p>
+          )}
+          {detailError && (
+            <p className="flex items-start justify-between gap-3">
+              <span>⚠ {detailError}</span>
+              <button
+                onClick={() => setDetailError(null)}
+                className="font-arcade text-[10px] text-rose-300 hover:text-white shrink-0"
+              >
+                CERRAR
+              </button>
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Navigation Tabs */}
       <nav className="flex flex-wrap gap-2.5 border-b-2 border-arcade-border pb-3">
@@ -567,7 +660,7 @@ export const GameStatsDashboard: React.FC = () => {
                           {m.patterns && m.patterns.includes('DEADLY_STREAK') && (
                             <span className="flex items-center space-x-1 text-[9px] font-arcade bg-rose-950 text-rose-300 border border-rose-500 px-1.5 py-0.5">
                               <MiniPixelMedal kind="DEADLY_STREAK" />
-                              <span>STREAK</span>
+                              <span>DEADLY_STREAK</span>
                             </span>
                           )}
                           {m.patterns && m.patterns.includes('COMEBACK') && (

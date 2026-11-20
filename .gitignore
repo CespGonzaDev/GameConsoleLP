@@ -1,0 +1,21 @@
+# Dependencias y builds
+node_modules/
+gameconsole-web/dist/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Entorno / IDE / SO
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
