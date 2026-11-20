@@ -27,6 +27,18 @@ Cada partida genera un identificador único `matchId` (UUID v4), emite eventos t
 
 - **Video de demostración del sistema completo:** [https://youtu.be/a1vneCDl4tM](https://youtu.be/a1vneCDl4tM)
 
+### Mapa Rápido de Entregables (Guía de Evaluación)
+
+| Requisito del Proyecto | Implementación en el Repositorio |
+| :--- | :--- |
+| **Arquitectura POO y Consola Web** | [`BaseGame.ts`](gameconsole-web/src/core/BaseGame.ts), [`GameSessionManager.ts`](gameconsole-web/src/core/GameSessionManager.ts), [`GameRegistry.ts`](gameconsole-web/src/core/GameRegistry.ts) |
+| **3 Videojuegos Funcionales (POO)** | [`SnakeGame.ts`](gameconsole-web/src/games/SnakeGame.ts), [`BattleshipGame.ts`](gameconsole-web/src/games/BattleshipGame.ts), [`HeadFootballGame.ts`](gameconsole-web/src/games/HeadFootballGame.ts) |
+| **Ejecución Concurrente (Multi-Instancia / Pestañas)** | [`MultiInstanceDock.tsx`](gameconsole-web/src/components/console/MultiInstanceDock.tsx), [`App.tsx`](gameconsole-web/src/App.tsx) (`?tab=play`) |
+| **Inteligencia de Juego en SWI-Prolog** | [`battleship_ai.pl`](prolog-service/battleship_ai.pl), [`solver.py`](prolog-service/solver.py), [`main.py`](prolog-service/main.py) |
+| **Contrato y Envío Concurrente a GameStats** | [`contracts.ts`](gameconsole-web/src/types/contracts.ts), [`EventDispatcher.ts`](gameconsole-web/src/services/EventDispatcher.ts) |
+| **Panel de Estadísticas en Tiempo Real** | [`GameStatsDashboard.tsx`](gameconsole-web/src/components/dashboard/GameStatsDashboard.tsx), [`GameStatsClient.ts`](gameconsole-web/src/services/GameStatsClient.ts) |
+| **Docker, Ejecución Integrada y CI/CD** | [`docker-compose.yml`](docker-compose.yml), [`default.conf.template`](gameconsole-web/default.conf.template), [`ci.yml`](.github/workflows/ci.yml) |
+
 ---
 
 ## Arquitectura General del Sistema
@@ -166,6 +178,22 @@ Para no afectar el bucle de 60 FPS ni la capacidad de respuesta de la interfaz:
 - **Sanitización estricta**: `sanitizeEnvelope()` restringe cada evento exactamente a los 9 campos reconocidos por el esquema de Go (`DisallowUnknownFields`): `eventId`, `timestamp`, `gameId`, `gameVersion`, `matchId`, `playerId`, `type`, `action` y `data`.
 - **Reintentos con *backoff* exponencial**: Ante fallos de red o HTTP distinto de `200`/`202`, el lote se reinserta al frente de la cola (`unshift`) preservando el orden cronológico exacto y reintenta con espera exponencial más *jitter* (`baseRetryDelayMs = 1000`, tope `maxRetryDelayMs = 30000`). Go y Scala deduplican eventos mediante `eventId`.
 - **Entrega garantizada al finalizar o cerrar**: Al emitir `LIFECYCLE:MATCH_FINISHED`, o ante eventos `pagehide` / `beforeunload` (`flushOnExit()`), el despachador ejecuta un vaciado urgente con `fetch(..., { keepalive: true })` respetando el límite del navegador (`KEEPALIVE_MAX_CHARS = 60000` caracteres, ~64 KB).
+
+**Ejemplo de sobre canónico enviado a `POST /api/gamestats/events`:**
+
+```json
+{
+  "eventId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "timestamp": "2026-11-20T21:15:00.000Z",
+  "gameId": "battleship",
+  "gameVersion": "1.0.0",
+  "matchId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "playerId": "Player1",
+  "type": "ACTION",
+  "action": "FIRE_SHOT",
+  "data": { "coord": { "row": "D", "col": 5 }, "turn": 4, "result": "HIT", "shipSunk": null }
+}
+```
 
 ### Panel `GAMESTATS LIVE` (`GameStatsDashboard.tsx` + `GameStatsClient.ts`)
 
