@@ -19,3 +19,7 @@ venv/
 .DS_Store
 Thumbs.db
 *.log
+
+# Documentacion local de entrega
+docs/
+/docs/
